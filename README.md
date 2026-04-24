@@ -2,8 +2,6 @@
 
 Alunos: João Victor da Silva Santos e Weversson Lucas Vital da Silva
 
-Implementação do enunciado `G1-SPD-2026-1` usando Java com sockets, threads, autenticação por usuário e persistência em JSON.
-
 ## O que foi implementado
 
 - Servidor de leilão com múltiplos clientes simultâneos.
