@@ -14,6 +14,7 @@ import java.net.DatagramSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
+import javax.crypto.SecretKey;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JFrame;
@@ -62,6 +63,7 @@ public class AuctionClient extends JFrame {
 
     private boolean authenticated;
     private String authenticatedRole = "";
+    private SecretKey sessionKey;
 
     public static void main(String[] args) {
         final String host = args.length > 0 ? args[0] : "localhost";
@@ -351,11 +353,11 @@ public class AuctionClient extends JFrame {
 
             authenticated = false;
             authenticatedRole = "";
+            sessionKey = null;
             appendEvent("[INFO] Conexao estabelecida com o servidor.");
             appendEvent("[INFO] Porta UDP local: " + udpSocket.getLocalPort());
             appendEvent("[INFO] Autentique-se para liberar as acoes do leilao.");
 
-            sendCommand("UDP " + udpSocket.getLocalPort());
             sendCommand("STATUS");
             updateControlState();
         } catch (NumberFormatException e) {
@@ -381,7 +383,8 @@ public class AuctionClient extends JFrame {
             return;
         }
 
-        sendCommand("LOGIN " + username + "|" + password);
+        sessionKey = null;
+        sendRawCommand("AUTH REQUEST|" + username);
     }
 
     private void startTcpListener() {
@@ -422,7 +425,7 @@ public class AuctionClient extends JFrame {
                                 packet.getLength(),
                                 StandardCharsets.UTF_8
                         );
-                        handleServerMessage(message, true);
+                        handleUdpMessage(message);
                     } catch (IOException e) {
                         if (udpSocket != null && !udpSocket.isClosed()) {
                             appendEvent("[ERRO] Erro ao receber atualizacao UDP: " + e.getMessage());
@@ -466,11 +469,27 @@ public class AuctionClient extends JFrame {
             return;
         }
 
-        serverWriter.println(command);
+        if (authenticated && sessionKey != null) {
+            serverWriter.println(AuctionCrypto.encryptMessage(sessionKey, command));
+            return;
+        }
+
+        sendRawCommand(command);
+    }
+
+    private void sendRawCommand(String command) {
+        if (serverWriter != null) {
+            serverWriter.println(command);
+        }
     }
 
     private void handleServerMessage(String rawMessage, boolean udpMessage) {
-        String[] parts = rawMessage.split("\\|");
+        String decodedMessage = decodeMessage(rawMessage);
+        if (decodedMessage == null) {
+            return;
+        }
+
+        String[] parts = decodedMessage.split("\\|");
         String type = parts.length > 0 ? parts[0] : "INFO";
 
         if ("AUTH".equals(type)) {
@@ -478,7 +497,9 @@ public class AuctionClient extends JFrame {
             return;
         }
 
-        String message = rawMessage.contains("|") ? rawMessage.substring(rawMessage.indexOf('|') + 1) : rawMessage;
+        String message = decodedMessage.contains("|")
+                ? decodedMessage.substring(decodedMessage.indexOf('|') + 1)
+                : decodedMessage;
 
         String prefix;
         if ("ERROR".equals(type)) {
@@ -498,14 +519,50 @@ public class AuctionClient extends JFrame {
         }
     }
 
+    private void handleUdpMessage(String rawMessage) {
+        if (AuctionCrypto.isSecureEnvelope(rawMessage) && sessionKey == null) {
+            appendEvent("[ERRO] Atualizacao segura recebida antes da autenticacao.");
+            return;
+        }
+        handleServerMessage(rawMessage, true);
+    }
+
+    private String decodeMessage(String rawMessage) {
+        if (!AuctionCrypto.isSecureEnvelope(rawMessage)) {
+            return rawMessage;
+        }
+
+        if (sessionKey == null) {
+            appendEvent("[ERRO] Mensagem segura recebida sem chave de sessao.");
+            return null;
+        }
+
+        try {
+            return AuctionCrypto.decryptMessage(rawMessage, sessionKey);
+        } catch (IllegalStateException e) {
+            appendEvent("[ERRO] Nao foi possivel descriptografar a mensagem do servidor.");
+            return null;
+        }
+    }
+
     private void handleAuthMessage(String[] parts) {
+        if (parts.length >= 4 && "CHALLENGE".equals(parts[1])) {
+            completeAuthentication(parts[2], parts[3]);
+            return;
+        }
+
         if (parts.length >= 4 && "SUCCESS".equals(parts[1])) {
             authenticated = true;
             authenticatedRole = parts[3];
             appendEvent("[INFO] Autenticacao concluida para " + parts[2] + " com perfil " + authenticatedRole + ".");
+            if (udpSocket != null && !udpSocket.isClosed()) {
+                sendCommand("UDP " + udpSocket.getLocalPort());
+            }
+            sendCommand("STATUS");
         } else if (parts.length >= 3 && "ERROR".equals(parts[1])) {
             authenticated = false;
             authenticatedRole = "";
+            sessionKey = null;
             appendEvent("[ERRO] " + parts[2]);
             showErrorAsync(parts[2]);
         } else {
@@ -513,6 +570,27 @@ public class AuctionClient extends JFrame {
         }
 
         updateControlState();
+    }
+
+    private void completeAuthentication(String username, String nonce) {
+        String typedUsername = usernameField.getText().trim();
+        String password = new String(passwordField.getPassword()).trim();
+
+        if (!typedUsername.equals(username)) {
+            appendEvent("[ERRO] O desafio recebido pertence a outro usuario.");
+            showErrorAsync("O desafio recebido nao corresponde ao usuario informado.");
+            return;
+        }
+
+        if (password.isEmpty()) {
+            showErrorAsync("Informe a senha para concluir a autenticacao.");
+            return;
+        }
+
+        SecretKey loginKey = AuctionCrypto.deriveLoginKey(password, nonce);
+        sessionKey = AuctionCrypto.deriveSessionKey(loginKey);
+        String proof = AuctionCrypto.createProof(username, loginKey);
+        sendRawCommand("AUTH RESPONSE|" + username + "|" + proof);
     }
 
     private void updateAuctionSummary(final String message) {
@@ -539,6 +617,7 @@ public class AuctionClient extends JFrame {
         closeResources();
         authenticated = false;
         authenticatedRole = "";
+        sessionKey = null;
 
         SwingUtilities.invokeLater(new Runnable() {
             @Override
@@ -551,7 +630,7 @@ public class AuctionClient extends JFrame {
 
     private void closeClient() {
         if (serverWriter != null) {
-            serverWriter.println("QUIT");
+            sendCommand("QUIT");
         }
         closeResources();
         dispose();

@@ -26,11 +26,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import javax.crypto.SecretKey;
 
 import javax.swing.BorderFactory;
 import javax.swing.DefaultListModel;
@@ -206,6 +209,9 @@ public class AuctionServer {
         private BufferedReader reader;
         private PrintWriter writer;
         private UserRecord authenticatedUser;
+        private UserRecord pendingAuthUser;
+        private String authNonce;
+        private SecretKey sessionKey;
         private InetAddress udpAddress;
         private int udpPort = -1;
         private boolean connectionClosed;
@@ -221,18 +227,48 @@ public class AuctionServer {
                 writer = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
 
                 sendInfo("Conexão estabelecida com o servidor de leilão.");
-                sendInfo("Faça login com: LOGIN usuario|senha");
+                sendInfo("Autentique-se pelo cliente para estabelecer o canal seguro.");
                 sendInfo("Roles disponíveis: ADMIN, COMPRADOR, OBSERVADOR.");
 
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    handleCommand(line.trim());
+                    String decodedLine = decodeIncomingMessage(line.trim());
+                    if (decodedLine != null) {
+                        handleCommand(decodedLine.trim());
+                    }
                 }
             } catch (IOException e) {
                 notifyLog("Conexão encerrada: " + e.getMessage());
             } finally {
                 closeConnection();
             }
+        }
+
+        private String decodeIncomingMessage(String rawMessage) {
+            if (rawMessage.isEmpty()) {
+                return null;
+            }
+
+            if (AuctionCrypto.isSecureEnvelope(rawMessage)) {
+                if (sessionKey == null) {
+                    sendPlainError("Canal seguro ainda nao foi estabelecido.");
+                    return null;
+                }
+
+                try {
+                    return AuctionCrypto.decryptMessage(rawMessage, sessionKey);
+                } catch (IllegalStateException e) {
+                    sendError("Nao foi possivel descriptografar a mensagem recebida.");
+                    return null;
+                }
+            }
+
+            if (sessionKey != null && authenticatedUser != null && !rawMessage.startsWith("AUTH ")) {
+                sendError("Apos autenticar, envie comandos apenas pelo canal seguro.");
+                return null;
+            }
+
+            return rawMessage;
         }
 
         private void handleCommand(String line) {
@@ -245,8 +281,8 @@ public class AuctionServer {
             String argument = parts.length > 1 ? parts[1].trim() : "";
 
             switch (command) {
-                case "LOGIN":
-                    handleLogin(argument);
+                case "AUTH":
+                    handleAuthentication(argument);
                     break;
                 case "UDP":
                     handleUdpRegistration(argument);
@@ -276,40 +312,91 @@ public class AuctionServer {
             }
         }
 
-        private void handleLogin(String argument) {
-            String[] values = argument.split("\\|", 2);
+        private void handleAuthentication(String argument) {
+            String[] values = argument.split("\\|", 3);
             if (values.length < 2) {
-                sendAuthFailure("Use LOGIN usuario|senha");
-                sendError("Use LOGIN usuario|senha");
+                sendAuthFailure("Use AUTH REQUEST|usuario ou AUTH RESPONSE|usuario|prova.");
                 return;
             }
 
-            String username = values[0].trim();
-            String password = values[1].trim();
+            String action = values[0].trim().toUpperCase(Locale.ROOT);
+            String username = values[1].trim();
 
-            if (username.isEmpty() || password.isEmpty()) {
-                sendAuthFailure("Usuario e senha sao obrigatorios.");
-                sendError("Usuário e senha são obrigatórios.");
+            if ("REQUEST".equals(action)) {
+                startAuthentication(username);
                 return;
             }
 
-            UserRecord user = userStore.authenticate(username, password);
+            if ("RESPONSE".equals(action)) {
+                String proof = values.length > 2 ? values[2].trim() : "";
+                finishAuthentication(username, proof);
+                return;
+            }
+
+            sendAuthFailure("Etapa de autenticacao desconhecida.");
+        }
+
+        private void startAuthentication(String username) {
+            if (username.isEmpty()) {
+                sendAuthFailure("Usuario e obrigatorio.");
+                return;
+            }
+
+            clearPendingAuthentication();
+            UserRecord user = userStore.findUser(username);
             if (user == null) {
                 sendAuthFailure("Usuario ou senha invalidos.");
-                sendError("Usuário ou senha inválidos.");
                 return;
             }
 
-            authenticatedUser = user;
-            sendAuthSuccess(user);
-            sendInfo("Login realizado como " + user.getUsername() + " (" + user.getRole().name() + ").");
+            pendingAuthUser = user;
+            authNonce = AuctionCrypto.generateNonce();
+            sendPlain("AUTH", "CHALLENGE|" + username + "|" + authNonce);
+        }
+
+        private void finishAuthentication(String username, String proof) {
+            if (pendingAuthUser == null || authNonce == null) {
+                sendAuthFailure("Solicite um desafio de autenticacao antes de responder.");
+                return;
+            }
+
+            if (proof.isEmpty() || !Objects.equals(pendingAuthUser.getUsername(), username)) {
+                clearPendingAuthentication();
+                sendAuthFailure("Resposta de autenticacao invalida.");
+                return;
+            }
+
+            SecretKey loginKey = AuctionCrypto.deriveLoginKey(pendingAuthUser.getPassword(), authNonce);
+            String expectedProof = AuctionCrypto.createProof(username, loginKey);
+            if (!AuctionCrypto.proofMatches(expectedProof, proof)) {
+                clearPendingAuthentication();
+                sendAuthFailure("Usuario ou senha invalidos.");
+                return;
+            }
+
+            authenticatedUser = pendingAuthUser;
+            sessionKey = AuctionCrypto.deriveSessionKey(loginKey);
+            clearPendingAuthentication();
+
+            sendAuthSuccess(authenticatedUser);
+            sendInfo("Canal seguro estabelecido para " + authenticatedUser.getUsername() + ".");
             sendStatus(auctionState.snapshot());
 
-            String event = auctionState.recordParticipantEvent(user.getUsername() + " entrou no leilão como " + user.getRole().name() + ".");
+            String event = auctionState.recordParticipantEvent(
+                    authenticatedUser.getUsername() + " entrou no leilão como " + authenticatedUser.getRole().name() + "."
+            );
             broadcastEvent(event);
         }
 
+        private void clearPendingAuthentication() {
+            pendingAuthUser = null;
+            authNonce = null;
+        }
+
         private void handleUdpRegistration(String portText) {
+            if (!ensureAuthenticated()) {
+                return;
+            }
             try {
                 udpPort = Integer.parseInt(portText);
                 udpAddress = socket.getInetAddress();
@@ -320,11 +407,7 @@ public class AuctionServer {
         }
 
         private void handleItemRegistration(String argument) {
-            if (!ensureAuthenticated()) {
-                return;
-            }
-            if (!authenticatedUser.getRole().canRegisterItem()) {
-                sendError("Apenas usuários ADMIN podem cadastrar itens.");
+            if (!ensureRole(UserRole.ADMIN, "Apenas usuários ADMIN podem cadastrar itens.")) {
                 return;
             }
 
@@ -347,11 +430,7 @@ public class AuctionServer {
         }
 
         private void handleBid(String argument) {
-            if (!ensureAuthenticated()) {
-                return;
-            }
-            if (!authenticatedUser.getRole().canBid()) {
-                sendError("Apenas usuários COMPRADOR podem enviar lances.");
+            if (!ensureRole(UserRole.COMPRADOR, "Apenas usuários COMPRADOR podem enviar lances.")) {
                 return;
             }
 
@@ -365,11 +444,7 @@ public class AuctionServer {
         }
 
         private void handleCloseAuction() {
-            if (!ensureAuthenticated()) {
-                return;
-            }
-            if (!authenticatedUser.getRole().canCloseAuction()) {
-                sendError("Apenas usuários ADMIN podem encerrar o leilão.");
+            if (!ensureRole(UserRole.ADMIN, "Apenas usuários ADMIN podem encerrar o leilão.")) {
                 return;
             }
 
@@ -379,7 +454,18 @@ public class AuctionServer {
 
         private boolean ensureAuthenticated() {
             if (authenticatedUser == null) {
-                sendError("Faça LOGIN antes de usar esse comando.");
+                sendError("Autentique-se antes de usar esse comando.");
+                return false;
+            }
+            return true;
+        }
+
+        private boolean ensureRole(UserRole expectedRole, String errorMessage) {
+            if (!ensureAuthenticated()) {
+                return false;
+            }
+            if (authenticatedUser.getRole() != expectedRole) {
+                sendError(errorMessage);
                 return false;
             }
             return true;
@@ -427,7 +513,8 @@ public class AuctionServer {
 
         private void sendHelp() {
             sendInfo("Comandos disponíveis:");
-            sendInfo("LOGIN usuario|senha");
+            sendInfo("AUTH REQUEST|usuario");
+            sendInfo("AUTH RESPONSE|usuario|prova");
             sendInfo("ITEM nome_do_item|valor_inicial");
             sendInfo("BID valor");
             sendInfo("STATUS");
@@ -441,15 +528,24 @@ public class AuctionServer {
         }
 
         private void sendAuthSuccess(UserRecord user) {
-            send("AUTH", "SUCCESS|" + user.getUsername() + "|" + user.getRole().name());
+            sendPlain("AUTH", "SUCCESS|" + user.getUsername() + "|" + user.getRole().name());
         }
 
         private void sendAuthFailure(String message) {
-            send("AUTH", "ERROR|" + message);
+            clearPendingAuthentication();
+            sessionKey = null;
+            authenticatedUser = null;
+            udpAddress = null;
+            udpPort = -1;
+            sendPlain("AUTH", "ERROR|" + message);
         }
 
         private void sendError(String message) {
             send("ERROR", message);
+        }
+
+        private void sendPlainError(String message) {
+            sendPlain("ERROR", message);
         }
 
         private void sendStatus(String message) {
@@ -461,6 +557,18 @@ public class AuctionServer {
         }
 
         private void send(String type, String message) {
+            String payload = type + "|" + message;
+            if (writer == null) {
+                return;
+            }
+            if (sessionKey != null && authenticatedUser != null && !"AUTH".equals(type)) {
+                writer.println(AuctionCrypto.encryptMessage(sessionKey, payload));
+                return;
+            }
+            writer.println(payload);
+        }
+
+        private void sendPlain(String type, String message) {
             if (writer != null) {
                 writer.println(type + "|" + message);
             }
@@ -471,7 +579,7 @@ public class AuctionServer {
                 return;
             }
 
-            byte[] data = ("EVENT|" + message).getBytes(StandardCharsets.UTF_8);
+            byte[] data = AuctionCrypto.encryptMessage(sessionKey, "EVENT|" + message).getBytes(StandardCharsets.UTF_8);
             DatagramPacket packet = new DatagramPacket(data, data.length, udpAddress, udpPort);
 
             try (DatagramSocket datagramSocket = new DatagramSocket()) {
@@ -667,15 +775,8 @@ public class AuctionServer {
             save();
         }
 
-        public synchronized UserRecord authenticate(String username, String password) {
-            UserRecord user = users.get(username);
-            if (user == null) {
-                return null;
-            }
-            if (!user.getPassword().equals(password)) {
-                return null;
-            }
-            return user;
+        public synchronized UserRecord findUser(String username) {
+            return users.get(username);
         }
 
         public synchronized List<UserRecord> listUsers() {
@@ -964,18 +1065,6 @@ public class AuctionServer {
         ADMIN,
         COMPRADOR,
         OBSERVADOR;
-
-        private boolean canRegisterItem() {
-            return this == ADMIN;
-        }
-
-        private boolean canBid() {
-            return this == COMPRADOR;
-        }
-
-        private boolean canCloseAuction() {
-            return this == ADMIN;
-        }
     }
 
     private static final class UserRecord {
