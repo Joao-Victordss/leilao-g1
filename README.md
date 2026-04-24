@@ -14,16 +14,20 @@ Alunos: João Victor da Silva Santos e Weversson Lucas Vital da Silva
 - Histórico salvo em arquivo JSON ao encerrar o leilão.
 - Usuários persistidos em `usuarios.json`.
 - Comunicação por TCP e envio de eventos também por UDP.
+- Autenticação por desafio-resposta, sem envio da senha em texto puro.
+- Canal seguro com criptografia de sessão para mensagens TCP e eventos UDP após autenticação.
+- Validação de permissões no servidor, além do bloqueio visual da interface.
 
 ## Arquivos
 
 - `AuctionServer.java`: servidor principal.
 - `AuctionClient.java`: cliente com interface gráfica em Swing.
+- `AuctionCrypto.java`: utilitário de derivação de chave, prova de autenticação e criptografia da sessão.
 
 ## Como compilar
 
 ```bash
-javac AuctionServer.java AuctionClient.java
+javac AuctionCrypto.java AuctionServer.java AuctionClient.java
 ```
 
 ## Como executar
@@ -44,7 +48,8 @@ Ao abrir o cliente:
 
 - preencha `Host`, `Porta`, `Usuário` e `Senha`
 - clique em `Conectar`
-- use os campos da janela para cadastrar item, enviar lance, atualizar status e encerrar o leilão
+- clique em `Autenticar` para iniciar o login seguro
+- depois da autenticação, use os campos da janela para cadastrar item, enviar lance, atualizar status e encerrar o leilão conforme o perfil do usuário
 - acompanhe tudo no painel em tempo real
 
 ## Usuários e roles
@@ -62,6 +67,15 @@ As permissões são:
 - `OBSERVADOR`: apenas acompanha o leilão.
 
 O cadastro de novos usuários é feito pela interface gráfica do servidor.
+
+Mesmo com os botões sendo habilitados ou desabilitados na interface conforme a role, o servidor também valida as permissões internamente. Isso impede ações indevidas caso alguém tente usar terminal, script ou um cliente modificado.
+
+## Segurança
+
+- O cliente solicita um desafio de autenticação ao servidor.
+- A senha não é enviada em texto puro pela rede.
+- Após a autenticação, a sessão passa a usar criptografia para os comandos TCP e para os eventos UDP.
+- As permissões continuam sendo verificadas no backend, não apenas na interface.
 
 ## Arquivos gerados
 
