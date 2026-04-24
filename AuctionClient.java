@@ -19,9 +19,10 @@ import javax.swing.JButton;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
-import javax.swing.JPasswordField;
 import javax.swing.JPanel;
+import javax.swing.JPasswordField;
 import javax.swing.JScrollPane;
+import javax.swing.JSplitPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
@@ -30,29 +31,37 @@ import javax.swing.WindowConstants;
 public class AuctionClient extends JFrame {
     private static final int DEFAULT_PORT = 5000;
 
-    private final JTextField hostField = new JTextField("localhost", 12);
-    private final JTextField portField = new JTextField(String.valueOf(DEFAULT_PORT), 6);
-    private final JTextField usernameField = new JTextField(12);
-    private final JPasswordField passwordField = new JPasswordField(12);
+    private final JTextField hostField = new JTextField("localhost", 18);
+    private final JTextField portField = new JTextField(String.valueOf(DEFAULT_PORT), 8);
+    private final JTextField usernameField = new JTextField(18);
+    private final JPasswordField passwordField = new JPasswordField(18);
 
-    private final JTextField itemNameField = new JTextField(16);
-    private final JTextField itemValueField = new JTextField(8);
-    private final JTextField bidValueField = new JTextField(10);
+    private final JTextField itemNameField = new JTextField(18);
+    private final JTextField itemValueField = new JTextField(10);
+    private final JTextField bidValueField = new JTextField(12);
 
     private final JTextArea eventArea = new JTextArea();
-    private final JLabel statusLabel = new JLabel("Desconectado");
+    private final JTextArea auctionSummaryArea = new JTextArea("Nenhum item cadastrado ainda.");
 
-    private final JButton connectButton = new JButton("Conectar");
+    private final JLabel connectionStatusLabel = new JLabel("Desconectado");
+    private final JLabel authStatusLabel = new JLabel("Pendente");
+    private final JLabel roleStatusLabel = new JLabel("-");
+
+    private final JButton connectButton = new JButton("Conectar ao Servidor");
+    private final JButton authenticateButton = new JButton("Autenticar");
     private final JButton registerItemButton = new JButton("Cadastrar Item");
     private final JButton bidButton = new JButton("Enviar Lance");
     private final JButton statusButton = new JButton("Atualizar Status");
-    private final JButton closeAuctionButton = new JButton("Encerrar Leilão");
+    private final JButton closeAuctionButton = new JButton("Encerrar Leilao");
     private final JButton quitButton = new JButton("Sair");
 
     private Socket socket;
     private BufferedReader serverReader;
     private PrintWriter serverWriter;
     private DatagramSocket udpSocket;
+
+    private boolean authenticated;
+    private String authenticatedRole = "";
 
     public static void main(String[] args) {
         final String host = args.length > 0 ? args[0] : "localhost";
@@ -68,119 +77,246 @@ public class AuctionClient extends JFrame {
     }
 
     public AuctionClient(String host, int port) {
-        super("Cliente de Leilão");
+        super("Cliente de Leilao");
         hostField.setText(host);
         portField.setText(String.valueOf(port));
         buildInterface();
         bindActions();
-        updateControls(false);
+        updateControlState();
     }
 
     private void buildInterface() {
         setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-        setSize(new Dimension(900, 560));
+        setSize(new Dimension(1180, 760));
+        setMinimumSize(new Dimension(1020, 680));
         setLocationRelativeTo(null);
-        setLayout(new BorderLayout(10, 10));
 
-        JPanel connectionPanel = new JPanel(new GridBagLayout());
-        connectionPanel.setBorder(BorderFactory.createTitledBorder("Conexão"));
+        JPanel contentPanel = new JPanel(new BorderLayout(12, 12));
+        contentPanel.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+        setContentPane(contentPanel);
 
-        GridBagConstraints c = new GridBagConstraints();
-        c.insets = new Insets(5, 5, 5, 5);
-        c.anchor = GridBagConstraints.WEST;
+        JPanel sidebar = new JPanel(new GridBagLayout());
+        sidebar.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 4));
+
+        GridBagConstraints sidebarConstraints = new GridBagConstraints();
+        sidebarConstraints.gridx = 0;
+        sidebarConstraints.weightx = 1.0;
+        sidebarConstraints.fill = GridBagConstraints.HORIZONTAL;
+        sidebarConstraints.insets = new Insets(0, 0, 10, 0);
+
+        sidebarConstraints.gridy = 0;
+        sidebar.add(buildConnectionPanel(), sidebarConstraints);
+
+        sidebarConstraints.gridy = 1;
+        sidebar.add(buildAuthenticationPanel(), sidebarConstraints);
+
+        sidebarConstraints.gridy = 2;
+        sidebar.add(buildItemPanel(), sidebarConstraints);
+
+        sidebarConstraints.gridy = 3;
+        sidebar.add(buildBidPanel(), sidebarConstraints);
+
+        sidebarConstraints.gridy = 4;
+        sidebarConstraints.weighty = 1.0;
+        sidebarConstraints.fill = GridBagConstraints.BOTH;
+        sidebar.add(new JPanel(), sidebarConstraints);
+
+        JPanel rightPanel = new JPanel(new BorderLayout(12, 12));
+        rightPanel.add(buildSummaryPanel(), BorderLayout.NORTH);
+        rightPanel.add(buildEventsPanel(), BorderLayout.CENTER);
+
+        JSplitPane mainSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, sidebar, rightPanel);
+        mainSplitPane.setResizeWeight(0.34);
+        mainSplitPane.setDividerLocation(390);
+        mainSplitPane.setContinuousLayout(true);
+        mainSplitPane.setBorder(null);
+
+        JPanel footerPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        footerPanel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createTitledBorder("Status da Sessao"),
+                BorderFactory.createEmptyBorder(6, 8, 6, 8)
+        ));
+        footerPanel.add(new JLabel("Conexao:"));
+        footerPanel.add(connectionStatusLabel);
+        footerPanel.add(new JLabel("Autenticacao:"));
+        footerPanel.add(authStatusLabel);
+        footerPanel.add(new JLabel("Perfil:"));
+        footerPanel.add(roleStatusLabel);
+        footerPanel.add(quitButton);
+
+        contentPanel.add(mainSplitPane, BorderLayout.CENTER);
+        contentPanel.add(footerPanel, BorderLayout.SOUTH);
+    }
+
+    private JPanel buildConnectionPanel() {
+        JPanel panel = createSectionPanel("Conexao com o Servidor");
+        GridBagConstraints c = createDefaultConstraints();
 
         c.gridx = 0;
         c.gridy = 0;
-        connectionPanel.add(new JLabel("Host:"), c);
+        c.weightx = 0;
+        panel.add(new JLabel("Host:"), c);
 
         c.gridx = 1;
-        connectionPanel.add(hostField, c);
+        c.weightx = 1.0;
+        panel.add(hostField, c);
 
-        c.gridx = 2;
-        connectionPanel.add(new JLabel("Porta:"), c);
+        c.gridx = 0;
+        c.gridy = 1;
+        c.weightx = 0;
+        panel.add(new JLabel("Porta:"), c);
 
-        c.gridx = 3;
-        connectionPanel.add(portField, c);
+        c.gridx = 1;
+        c.weightx = 1.0;
+        panel.add(portField, c);
 
-        c.gridx = 4;
-        connectionPanel.add(new JLabel("Usuário:"), c);
+        c.gridx = 0;
+        c.gridy = 2;
+        c.gridwidth = 2;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        panel.add(connectButton, c);
 
-        c.gridx = 5;
-        connectionPanel.add(usernameField, c);
+        return panel;
+    }
 
-        c.gridx = 6;
-        connectionPanel.add(new JLabel("Senha:"), c);
+    private JPanel buildAuthenticationPanel() {
+        JPanel panel = createSectionPanel("Autenticacao");
+        GridBagConstraints c = createDefaultConstraints();
 
-        c.gridx = 7;
-        connectionPanel.add(passwordField, c);
+        c.gridx = 0;
+        c.gridy = 0;
+        c.weightx = 0;
+        panel.add(new JLabel("Usuario:"), c);
 
-        c.gridx = 8;
-        connectionPanel.add(connectButton, c);
+        c.gridx = 1;
+        c.weightx = 1.0;
+        panel.add(usernameField, c);
 
-        JPanel actionPanel = new JPanel(new GridBagLayout());
-        actionPanel.setBorder(BorderFactory.createTitledBorder("Ações do Leilão"));
+        c.gridx = 0;
+        c.gridy = 1;
+        c.weightx = 0;
+        panel.add(new JLabel("Senha:"), c);
 
-        GridBagConstraints a = new GridBagConstraints();
-        a.insets = new Insets(5, 5, 5, 5);
-        a.anchor = GridBagConstraints.WEST;
+        c.gridx = 1;
+        c.weightx = 1.0;
+        panel.add(passwordField, c);
 
-        a.gridx = 0;
-        a.gridy = 0;
-        actionPanel.add(new JLabel("Item:"), a);
+        c.gridx = 0;
+        c.gridy = 2;
+        c.gridwidth = 2;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        panel.add(authenticateButton, c);
 
-        a.gridx = 1;
-        a.fill = GridBagConstraints.HORIZONTAL;
-        actionPanel.add(itemNameField, a);
+        JLabel helpLabel = new JLabel("<html>1. Conecte ao servidor.<br>2. Informe usuario e senha.<br>3. Clique em Autenticar para liberar as acoes do seu perfil.</html>");
+        c.gridy = 3;
+        panel.add(helpLabel, c);
 
-        a.gridx = 2;
-        a.fill = GridBagConstraints.NONE;
-        actionPanel.add(new JLabel("Valor inicial:"), a);
+        return panel;
+    }
 
-        a.gridx = 3;
-        actionPanel.add(itemValueField, a);
+    private JPanel buildItemPanel() {
+        JPanel panel = createSectionPanel("Cadastro do Item");
+        GridBagConstraints c = createDefaultConstraints();
 
-        a.gridx = 4;
-        actionPanel.add(registerItemButton, a);
+        c.gridx = 0;
+        c.gridy = 0;
+        c.weightx = 0;
+        panel.add(new JLabel("Nome do item:"), c);
 
-        a.gridx = 0;
-        a.gridy = 1;
-        actionPanel.add(new JLabel("Lance:"), a);
+        c.gridx = 1;
+        c.weightx = 1.0;
+        panel.add(itemNameField, c);
 
-        a.gridx = 1;
-        actionPanel.add(bidValueField, a);
+        c.gridx = 0;
+        c.gridy = 1;
+        c.weightx = 0;
+        panel.add(new JLabel("Valor inicial:"), c);
 
-        a.gridx = 2;
-        actionPanel.add(bidButton, a);
+        c.gridx = 1;
+        c.weightx = 1.0;
+        panel.add(itemValueField, c);
 
-        a.gridx = 3;
-        actionPanel.add(statusButton, a);
+        c.gridx = 0;
+        c.gridy = 2;
+        c.gridwidth = 2;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        panel.add(registerItemButton, c);
 
-        a.gridx = 4;
-        actionPanel.add(closeAuctionButton, a);
+        return panel;
+    }
 
-        JPanel topPanel = new JPanel(new BorderLayout(10, 10));
-        topPanel.add(connectionPanel, BorderLayout.NORTH);
-        topPanel.add(actionPanel, BorderLayout.CENTER);
+    private JPanel buildBidPanel() {
+        JPanel panel = createSectionPanel("Lances e Controle");
+        GridBagConstraints c = createDefaultConstraints();
 
+        c.gridx = 0;
+        c.gridy = 0;
+        c.weightx = 0;
+        panel.add(new JLabel("Valor do lance:"), c);
+
+        c.gridx = 1;
+        c.weightx = 1.0;
+        panel.add(bidValueField, c);
+
+        c.gridx = 0;
+        c.gridy = 1;
+        c.gridwidth = 2;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        panel.add(bidButton, c);
+
+        c.gridy = 2;
+        panel.add(statusButton, c);
+
+        c.gridy = 3;
+        panel.add(closeAuctionButton, c);
+
+        return panel;
+    }
+
+    private JScrollPane buildSummaryPanel() {
+        auctionSummaryArea.setEditable(false);
+        auctionSummaryArea.setLineWrap(true);
+        auctionSummaryArea.setWrapStyleWord(true);
+        auctionSummaryArea.setRows(4);
+        auctionSummaryArea.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+
+        JScrollPane scrollPane = new JScrollPane(auctionSummaryArea);
+        scrollPane.setBorder(BorderFactory.createTitledBorder("Resumo Atual do Leilao"));
+        scrollPane.setPreferredSize(new Dimension(200, 140));
+        return scrollPane;
+    }
+
+    private JScrollPane buildEventsPanel() {
         eventArea.setEditable(false);
         eventArea.setLineWrap(true);
         eventArea.setWrapStyleWord(true);
+        eventArea.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
 
         JScrollPane scrollPane = new JScrollPane(eventArea);
         scrollPane.setBorder(BorderFactory.createTitledBorder("Painel em Tempo Real"));
+        return scrollPane;
+    }
 
-        JPanel footerPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        footerPanel.add(new JLabel("Resumo atual:"));
-        footerPanel.add(statusLabel);
-        footerPanel.add(quitButton);
+    private JPanel createSectionPanel(String title) {
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createTitledBorder(title),
+                BorderFactory.createEmptyBorder(8, 8, 8, 8)
+        ));
+        return panel;
+    }
 
-        add(topPanel, BorderLayout.NORTH);
-        add(scrollPane, BorderLayout.CENTER);
-        add(footerPanel, BorderLayout.SOUTH);
+    private GridBagConstraints createDefaultConstraints() {
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(6, 6, 6, 6);
+        c.anchor = GridBagConstraints.WEST;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        return c;
     }
 
     private void bindActions() {
         connectButton.addActionListener(e -> connect());
+        authenticateButton.addActionListener(e -> authenticate());
         registerItemButton.addActionListener(e -> registerItem());
         bidButton.addActionListener(e -> sendBid());
         statusButton.addActionListener(e -> sendCommand("STATUS"));
@@ -189,18 +325,16 @@ public class AuctionClient extends JFrame {
     }
 
     private void connect() {
-        if (socket != null && socket.isConnected() && !socket.isClosed()) {
-            appendEvent("[INFO] Cliente já está conectado.");
+        if (isConnected()) {
+            appendEvent("[INFO] Cliente ja esta conectado.");
             return;
         }
 
         String host = hostField.getText().trim();
         String portText = portField.getText().trim();
-        String username = usernameField.getText().trim();
-        String password = new String(passwordField.getPassword()).trim();
 
-        if (host.isEmpty() || portText.isEmpty() || username.isEmpty() || password.isEmpty()) {
-            showError("Preencha host, porta, usuário e senha antes de conectar.");
+        if (host.isEmpty() || portText.isEmpty()) {
+            showError("Preencha host e porta antes de conectar.");
             return;
         }
 
@@ -215,21 +349,39 @@ public class AuctionClient extends JFrame {
             startTcpListener();
             startUdpListener();
 
-            updateControls(true);
-            statusLabel.setText("Conectado a " + host + ":" + port);
-            appendEvent("[INFO] Conexão estabelecida com o servidor.");
+            authenticated = false;
+            authenticatedRole = "";
+            appendEvent("[INFO] Conexao estabelecida com o servidor.");
             appendEvent("[INFO] Porta UDP local: " + udpSocket.getLocalPort());
+            appendEvent("[INFO] Autentique-se para liberar as acoes do leilao.");
 
-            sendCommand("LOGIN " + username + "|" + password);
             sendCommand("UDP " + udpSocket.getLocalPort());
             sendCommand("STATUS");
+            updateControlState();
         } catch (NumberFormatException e) {
-            showError("Porta inválida.");
+            showError("Porta invalida.");
         } catch (IOException e) {
-            showError("Não foi possível conectar: " + e.getMessage());
+            showError("Nao foi possivel conectar: " + e.getMessage());
             closeResources();
-            updateControls(false);
+            updateControlState();
         }
+    }
+
+    private void authenticate() {
+        if (!isConnected()) {
+            showError("Conecte-se ao servidor antes de autenticar.");
+            return;
+        }
+
+        String username = usernameField.getText().trim();
+        String password = new String(passwordField.getPassword()).trim();
+
+        if (username.isEmpty() || password.isEmpty()) {
+            showError("Informe usuario e senha para autenticar.");
+            return;
+        }
+
+        sendCommand("LOGIN " + username + "|" + password);
     }
 
     private void startTcpListener() {
@@ -242,7 +394,7 @@ public class AuctionClient extends JFrame {
                         handleServerMessage(line, false);
                     }
                 } catch (IOException e) {
-                    appendEvent("[ERRO] Conexão TCP encerrada: " + e.getMessage());
+                    appendEvent("[ERRO] Conexao TCP encerrada: " + e.getMessage());
                 } finally {
                     handleDisconnection();
                 }
@@ -273,7 +425,7 @@ public class AuctionClient extends JFrame {
                         handleServerMessage(message, true);
                     } catch (IOException e) {
                         if (udpSocket != null && !udpSocket.isClosed()) {
-                            appendEvent("[ERRO] Erro ao receber atualização UDP: " + e.getMessage());
+                            appendEvent("[ERRO] Erro ao receber atualizacao UDP: " + e.getMessage());
                         }
                         return;
                     }
@@ -318,9 +470,15 @@ public class AuctionClient extends JFrame {
     }
 
     private void handleServerMessage(String rawMessage, boolean udpMessage) {
-        String[] parts = rawMessage.split("\\|", 2);
-        String type = parts.length > 1 ? parts[0] : "INFO";
-        String message = parts.length > 1 ? parts[1] : rawMessage;
+        String[] parts = rawMessage.split("\\|");
+        String type = parts.length > 0 ? parts[0] : "INFO";
+
+        if ("AUTH".equals(type)) {
+            handleAuthMessage(parts);
+            return;
+        }
+
+        String message = rawMessage.contains("|") ? rawMessage.substring(rawMessage.indexOf('|') + 1) : rawMessage;
 
         String prefix;
         if ("ERROR".equals(type)) {
@@ -336,13 +494,35 @@ public class AuctionClient extends JFrame {
         appendEvent(prefix + " " + message);
 
         if ("STATUS".equals(type)) {
-            SwingUtilities.invokeLater(new Runnable() {
-                @Override
-                public void run() {
-                    statusLabel.setText(message);
-                }
-            });
+            updateAuctionSummary(message);
         }
+    }
+
+    private void handleAuthMessage(String[] parts) {
+        if (parts.length >= 4 && "SUCCESS".equals(parts[1])) {
+            authenticated = true;
+            authenticatedRole = parts[3];
+            appendEvent("[INFO] Autenticacao concluida para " + parts[2] + " com perfil " + authenticatedRole + ".");
+        } else if (parts.length >= 3 && "ERROR".equals(parts[1])) {
+            authenticated = false;
+            authenticatedRole = "";
+            appendEvent("[ERRO] " + parts[2]);
+            showErrorAsync(parts[2]);
+        } else {
+            appendEvent("[ERRO] Resposta de autenticacao invalida recebida do servidor.");
+        }
+
+        updateControlState();
+    }
+
+    private void updateAuctionSummary(final String message) {
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                auctionSummaryArea.setText(message);
+                auctionSummaryArea.setCaretPosition(0);
+            }
+        });
     }
 
     private void appendEvent(final String message) {
@@ -357,11 +537,14 @@ public class AuctionClient extends JFrame {
 
     private void handleDisconnection() {
         closeResources();
+        authenticated = false;
+        authenticatedRole = "";
+
         SwingUtilities.invokeLater(new Runnable() {
             @Override
             public void run() {
-                updateControls(false);
-                statusLabel.setText("Desconectado");
+                auctionSummaryArea.setText("Nenhum item cadastrado ainda.");
+                updateControlState();
             }
         });
     }
@@ -392,20 +575,48 @@ public class AuctionClient extends JFrame {
         udpSocket = null;
     }
 
-    private void updateControls(boolean connected) {
-        connectButton.setEnabled(!connected);
-        hostField.setEnabled(!connected);
-        portField.setEnabled(!connected);
-        usernameField.setEnabled(!connected);
-        passwordField.setEnabled(!connected);
+    private void updateControlState() {
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                boolean connected = isConnected();
+                boolean admin = connected && authenticated && "ADMIN".equalsIgnoreCase(authenticatedRole);
+                boolean buyer = connected && authenticated && "COMPRADOR".equalsIgnoreCase(authenticatedRole);
 
-        registerItemButton.setEnabled(connected);
-        bidButton.setEnabled(connected);
-        statusButton.setEnabled(connected);
-        closeAuctionButton.setEnabled(connected);
+                connectButton.setEnabled(!connected);
+                hostField.setEnabled(!connected);
+                portField.setEnabled(!connected);
+
+                usernameField.setEnabled(!authenticated);
+                passwordField.setEnabled(!authenticated);
+                authenticateButton.setEnabled(connected && !authenticated);
+
+                registerItemButton.setEnabled(admin);
+                bidButton.setEnabled(buyer);
+                statusButton.setEnabled(connected);
+                closeAuctionButton.setEnabled(admin);
+
+                connectionStatusLabel.setText(connected ? "Conectado" : "Desconectado");
+                authStatusLabel.setText(authenticated ? "Autenticado" : (connected ? "Aguardando login" : "Pendente"));
+                roleStatusLabel.setText(authenticated ? authenticatedRole : "-");
+            }
+        });
+    }
+
+    private boolean isConnected() {
+        return socket != null && socket.isConnected() && !socket.isClosed();
     }
 
     private void showError(String message) {
         JOptionPane.showMessageDialog(this, message, "Erro", JOptionPane.ERROR_MESSAGE);
+    }
+
+    private void showErrorAsync(final String message) {
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                showError(message);
+            }
+        });
     }
 }

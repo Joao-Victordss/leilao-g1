@@ -279,6 +279,7 @@ public class AuctionServer {
         private void handleLogin(String argument) {
             String[] values = argument.split("\\|", 2);
             if (values.length < 2) {
+                sendAuthFailure("Use LOGIN usuario|senha");
                 sendError("Use LOGIN usuario|senha");
                 return;
             }
@@ -287,17 +288,20 @@ public class AuctionServer {
             String password = values[1].trim();
 
             if (username.isEmpty() || password.isEmpty()) {
+                sendAuthFailure("Usuario e senha sao obrigatorios.");
                 sendError("Usuário e senha são obrigatórios.");
                 return;
             }
 
             UserRecord user = userStore.authenticate(username, password);
             if (user == null) {
+                sendAuthFailure("Usuario ou senha invalidos.");
                 sendError("Usuário ou senha inválidos.");
                 return;
             }
 
             authenticatedUser = user;
+            sendAuthSuccess(user);
             sendInfo("Login realizado como " + user.getUsername() + " (" + user.getRole().name() + ").");
             sendStatus(auctionState.snapshot());
 
@@ -434,6 +438,14 @@ public class AuctionServer {
 
         private void sendInfo(String message) {
             send("INFO", message);
+        }
+
+        private void sendAuthSuccess(UserRecord user) {
+            send("AUTH", "SUCCESS|" + user.getUsername() + "|" + user.getRole().name());
+        }
+
+        private void sendAuthFailure(String message) {
+            send("AUTH", "ERROR|" + message);
         }
 
         private void sendError(String message) {
@@ -743,15 +755,23 @@ public class AuctionServer {
 
         private void buildInterface(int port) {
             setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-            setSize(new Dimension(1100, 650));
+            setSize(new Dimension(1280, 760));
+            setMinimumSize(new Dimension(1100, 680));
             setLocationRelativeTo(null);
-            setLayout(new BorderLayout(10, 10));
+            setLayout(new BorderLayout(12, 12));
+
+            JPanel contentPanel = new JPanel(new BorderLayout(12, 12));
+            contentPanel.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+            setContentPane(contentPanel);
 
             JPanel topPanel = new JPanel(new GridBagLayout());
-            topPanel.setBorder(BorderFactory.createTitledBorder("Status do Servidor"));
+            topPanel.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createTitledBorder("Status do Servidor"),
+                    BorderFactory.createEmptyBorder(8, 8, 8, 8)
+            ));
 
             GridBagConstraints c = new GridBagConstraints();
-            c.insets = new Insets(5, 5, 5, 5);
+            c.insets = new Insets(6, 6, 6, 6);
             c.anchor = GridBagConstraints.WEST;
             c.fill = GridBagConstraints.HORIZONTAL;
 
@@ -761,18 +781,23 @@ public class AuctionServer {
             topPanel.add(new JLabel("Porta:"), c);
 
             c.gridx = 1;
+            c.weightx = 0.2;
             topPanel.add(new JLabel(String.valueOf(port)), c);
 
             c.gridx = 2;
+            c.weightx = 0;
             topPanel.add(new JLabel("Estado:"), c);
 
             c.gridx = 3;
+            c.weightx = 1.0;
             topPanel.add(serverStatusLabel, c);
 
             c.gridx = 4;
+            c.weightx = 0;
             topPanel.add(new JLabel("Clientes conectados:"), c);
 
             c.gridx = 5;
+            c.weightx = 0.2;
             topPanel.add(clientsLabel, c);
 
             c.gridx = 0;
@@ -784,17 +809,21 @@ public class AuctionServer {
             auctionArea.setEditable(false);
             auctionArea.setLineWrap(true);
             auctionArea.setWrapStyleWord(true);
-            auctionArea.setRows(3);
-            auctionArea.setOpaque(false);
-            auctionArea.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
-            topPanel.add(auctionArea, c);
+            auctionArea.setRows(4);
+            auctionArea.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+            JScrollPane auctionScrollPane = new JScrollPane(auctionArea);
+            auctionScrollPane.setBorder(BorderFactory.createTitledBorder("Resumo Atual do Leilao"));
+            topPanel.add(auctionScrollPane, c);
 
             JPanel usersPanel = new JPanel(new BorderLayout(10, 10));
-            usersPanel.setBorder(BorderFactory.createTitledBorder("Cadastro de Usuários"));
+            usersPanel.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createTitledBorder("Cadastro de Usuarios"),
+                    BorderFactory.createEmptyBorder(8, 8, 8, 8)
+            ));
 
             JPanel formPanel = new JPanel(new GridBagLayout());
             GridBagConstraints form = new GridBagConstraints();
-            form.insets = new Insets(4, 4, 4, 4);
+            form.insets = new Insets(6, 6, 6, 6);
             form.anchor = GridBagConstraints.WEST;
             form.fill = GridBagConstraints.HORIZONTAL;
 
@@ -833,22 +862,25 @@ public class AuctionServer {
             form.weightx = 1.0;
             formPanel.add(addUserButton, form);
 
+            userList.setVisibleRowCount(12);
             usersPanel.add(formPanel, BorderLayout.NORTH);
             usersPanel.add(new JScrollPane(userList), BorderLayout.CENTER);
 
             logArea.setEditable(false);
             logArea.setLineWrap(true);
             logArea.setWrapStyleWord(true);
+            logArea.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
             JScrollPane logPane = new JScrollPane(logArea);
             logPane.setBorder(BorderFactory.createTitledBorder("Eventos do Servidor"));
 
             JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, usersPanel, logPane);
-            splitPane.setResizeWeight(0.32);
-            splitPane.setDividerLocation(360);
+            splitPane.setResizeWeight(0.34);
+            splitPane.setDividerLocation(420);
             splitPane.setContinuousLayout(true);
+            splitPane.setBorder(null);
 
-            add(topPanel, BorderLayout.NORTH);
-            add(splitPane, BorderLayout.CENTER);
+            contentPanel.add(topPanel, BorderLayout.NORTH);
+            contentPanel.add(splitPane, BorderLayout.CENTER);
         }
 
         private void addUser() {
